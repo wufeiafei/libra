@@ -10,7 +10,7 @@ use bytecode_verifier::{verify_module, verify_script};
 use logger::prelude::*;
 use types::{
     account_address::AccountAddress,
-    transaction::{Program, SignedTransaction, TransactionArgument, TransactionPayload},
+    transaction::{Program, SignatureCheckedTransaction, TransactionArgument, TransactionPayload},
     vm_error::{VMStatus, VMVerificationError, VMVerificationStatus},
 };
 use vm::{
@@ -27,7 +27,7 @@ where
     'alloc: 'txn,
     P: ModuleCache<'alloc>,
 {
-    txn: SignedTransaction,
+    txn: SignatureCheckedTransaction,
     #[allow(dead_code)]
     txn_state: Option<VerifiedTransactionState<'alloc, 'txn, P>>,
 }
@@ -77,12 +77,11 @@ where
         let script = match CompiledScript::deserialize(&program.code()) {
             Ok(script) => script,
             Err(ref err) => {
-                error!("[VM] script deserialization failed");
+                warn!("[VM] script deserialization failed {:?}", err);
                 return Err(err.into());
             }
         };
         if !verify_actuals(&script, program.args()) {
-            error!("[VM] actual type mismatch");
             return Err(VMStatus::Verification(vec![VMVerificationStatus::Script(
                 VMVerificationError::TypeMismatch("Actual Type Mismatch".to_string()),
             )]));
@@ -97,7 +96,7 @@ where
         {
             Ok(modules) => modules,
             Err(ref err) => {
-                error!("[VM] module deserialization failed");
+                warn!("[VM] module deserialization failed {:?}", err);
                 return Err(err.into());
             }
         };
@@ -105,7 +104,7 @@ where
         // Run the script and module through the bytecode verifier.
         let (script, modules, statuses) = static_verify_program(sender_address, script, modules);
         if !statuses.is_empty() {
-            error!("[VM] bytecode verifier returned errors");
+            warn!("[VM] bytecode verifier returned errors");
             return Err(statuses.iter().collect());
         }
 
@@ -122,14 +121,14 @@ where
         self.txn_state.take()
     }
 
-    /// Returns a reference to the `SignedTransaction` within.
+    /// Returns a reference to the `SignatureCheckedTransaction` within.
     #[allow(dead_code)]
-    pub fn as_inner(&self) -> &SignedTransaction {
+    pub fn as_inner(&self) -> &SignatureCheckedTransaction {
         &self.txn
     }
 
-    /// Consumes `self` and returns the `SignedTransaction` within.
-    pub fn into_inner(self) -> SignedTransaction {
+    /// Consumes `self` and returns the `SignatureCheckedTransaction` within.
+    pub fn into_inner(self) -> SignatureCheckedTransaction {
         self.txn
     }
 }
@@ -198,6 +197,11 @@ fn verify_actuals(script: &CompiledScript, args: &[TransactionArgument]) -> bool
     let fh = script.function_handle_at(script.main().function);
     let sig = script.function_signature_at(fh.signature);
     if sig.arg_types.len() != args.len() {
+        warn!(
+            "[VM] different argument length: actuals {}, formals {}",
+            args.len(),
+            sig.arg_types.len()
+        );
         return false;
     }
     for (ty, arg) in sig.arg_types.iter().zip(args.iter()) {
@@ -206,7 +210,13 @@ fn verify_actuals(script: &CompiledScript, args: &[TransactionArgument]) -> bool
             (SignatureToken::Address, TransactionArgument::Address(_)) => (),
             (SignatureToken::ByteArray, TransactionArgument::ByteArray(_)) => (),
             (SignatureToken::String, TransactionArgument::String(_)) => (),
-            _ => return false,
+            _ => {
+                warn!(
+                    "[VM] different argument type: formal {:?}, actual {:?}",
+                    ty, arg
+                );
+                return false;
+            }
         }
     }
     true
